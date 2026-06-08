@@ -1,4 +1,4 @@
-﻿> "They put a watermark on my PDF. So I reversed their licensing."
+> "They put a watermark on my PDF. So I reversed their licensing."
 
 ---
 
@@ -135,6 +135,7 @@ No watermark. Lifetime commercial. Done.
 |------|------|
 | Original software | [lightpdf.com/free-pdf-editor.html](https://www.lightpdf.com/free-pdf-editor.html) |
 | Patcher (run as admin) | [patcher.ps1](patcher.ps1) |
+| Patched DLL (no hosts needed) | [files/Apowersoft.CommUtilities.Native.dll](files/Apowersoft.CommUtilities.Native.dll) |
 | Restore script | [restore.ps1](restore.ps1) |
 | Cracked license file | [files/passport.userinfo](files/passport.userinfo) |
 | Original license file | [files/passport.userinfo.original](files/passport.userinfo.original) |

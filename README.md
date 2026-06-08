@@ -128,6 +128,12 @@ DES encrypt. Write to passport.userinfo. Done.
 
 ---
 
+## Downloads
+
+- **Original software**: [LightPDF Editor](https://www.lightpdf.com/free-pdf-editor.html)
+- **Cracked version**: [files/passport.userinfo](files/passport.userinfo) (forged license, place in `%APPDATA%\LightPDF\LightPDF Editor\`)
+- **Patcher**: [patcher.ps1](patcher.ps1) (run as admin, does everything automatically)
+
 ## Files
 
 ### Package contents

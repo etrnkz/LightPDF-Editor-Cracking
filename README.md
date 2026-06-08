@@ -1,4 +1,4 @@
-﻿# LightPDF Editor Cracking
+# LightPDF Editor Cracking
 
 "They put a watermark on my PDF. So I reversed their licensing."
 
@@ -6,13 +6,7 @@
 
 ## The Origin Story
 
-Needed to submit a PDF report. Online editors were trash. Word destroyed my layout.
-
-Found LightPDF Editor. Did all my work. Hit Save.
-
-A watermark slammed across my report: *"Upgrade to Premium to remove watermark"*
-
-Hours of work, ruined. So I cracked it.
+Last week I had to submit a system analysis and vulnerability assessment report in PDF format. All the online editors I tried were either broken, slow, or wanted me to upload my files to some sketchy server. I figured I'd use Microsoft Word instead, but converting the PDF to a Word doc completely destroyed the entire layout -- tables misaligned, fonts wrong, diagrams scattered everywhere. After fighting with it for hours I found LightPDF Editor, a desktop app that actually opened my PDF perfectly. I finished all my edits, hit Save, and right as I was about to export, a massive watermark slammed across every single page of my report: "Upgrade to Premium to remove watermark." Hours of meticulous work, ruined by an ugly overlay I never agreed to. So I decided to crack it.
 
 ---
 

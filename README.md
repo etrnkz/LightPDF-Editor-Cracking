@@ -1,16 +1,30 @@
-# LightPDF Editor Cracking
+﻿.______   ______   _______    ______   .______      .___  ___.  __  .__   __.  _______ 
+|   _  \ /  __  \ |   ____|  /  __  \  |   _  \     |   \/   | |  | |  \ |  | |   ____|
+|  |_)  |  |  |  | |  |__   |  |  |  | |  |_)  |    |  \  /  | |  | |   \|  | |  |__   
+|   _  <|  |  |  | |   __|  |  |  |  | |      /     |  |\/|  | |  | |  . `  | |   __|  
+|  |_)  |  `--'  | |  |____ |  `--'  | |  |\  \----.|  |  |  | |  | |  |\   | |  |____ 
+|______/ \______/  |_______| \______/  | _| `._____||__|  |__| |__| |__| \__| |_______|
+                                                                                        
+                                                                                        
+ .___________.  ______   .___  ___.      ___       __    __  .___  ___.  __  .__   __. 
+|           | /  __  \  |   \/   |     /   \     |  |  |  | |   \/   | |  | |  \ |  | 
+`---|  |----`|  |  |  | |  \  /  |    /  ^  \    |  |  |  | |  \  /  | |  | |   \|  | 
+    |  |     |  |  |  | |  |\/|  |   /  /_\  \   |  |  |  | |  |\/|  | |  | |  . `  | 
+    |  |     |  `--'  | |  |  |  |  /  _____  \  |  `--'  | |  |  |  | |  | |  |\   | 
+    |__|      \______/  |__|  |__| /__/     \__\  \______/  |__|  |__| |__| |__| \__| 
+                                                                                        
 
 "They put a watermark on my PDF. So I reversed their licensing."
 
 ---
 
-## The Origin Story
+## > The Origin Story
 
 Last week I had to submit a system analysis and vulnerability assessment report in PDF format. All the online editors I tried were either broken, slow, or wanted me to upload my files to some sketchy server. I figured I'd use Microsoft Word instead, but converting the PDF to a Word doc completely destroyed the entire layout -- tables misaligned, fonts wrong, diagrams scattered everywhere. After fighting with it for hours I found LightPDF Editor, a desktop app that actually opened my PDF perfectly. I finished all my edits, hit Save, and right as I was about to export, a massive watermark slammed across every single page of my report: "Upgrade to Premium to remove watermark." Hours of meticulous work, ruined by an ugly overlay I never agreed to. So I decided to crack it.
 
 ---
 
-## TL;DR
+## > TL;DR
 
 ```powershell
 .\patcher.ps1         # Run as Admin. Done.
@@ -18,34 +32,31 @@ Last week I had to submit a system analysis and vulnerability assessment report 
 
 ---
 
-## Architecture
+## > Architecture
 
 ```
-LightPDF Editor.exe (41 MB, Qt5 C++)
-        |
-        v
-CommonLib.dll (C++/CLI bridge)
-        |
-        v
-Apowersoft.CommUtilities.Native.dll (5.6 MB, .NET)
-        |
-        +-- Passport.cs          <- Licensing controller
-        +-- ActiveServer.cs      <- Phone-home API
-        +-- Config.cs            <- Server URLs + encryption key
-        +-- Utils.cs             <- DES encrypt/decrypt
+  LightPDF Editor.exe (41 MB, Qt5 C++)
+          |
+          v
+  CommonLib.dll (C++/CLI bridge)
+          |
+          v
+  Apowersoft.CommUtilities.Native.dll (5.6 MB, .NET WPF)
+          |
+          +-- Passport.cs          Licensing controller
+          +-- ActiveServer.cs      Phone-home API
+          +-- AccountServer.cs     Auth API
+          +-- Config.cs            Server URLs + encryption key
+          +-- Utils.cs             DES encrypt/decrypt
 ```
 
-Golden rule of reversing: **.NET licensing in a native app = already won.**
+**Golden rule:** .NET licensing in a native app = already won.
 
 ---
 
-## Phase 1: The License File
+## > Phase 1: Crack the License File
 
-`%APPDATA%\LightPDF\LightPDF Editor\passport.userinfo`
-
-Encrypted with DES-CBC. Key: `ASCII("JuBsbsmP")`. Static. Hardcoded. Not even AES.
-
-Decrypt:
+There's a file at `%APPDATA%\LightPDF\LightPDF Editor\passport.userinfo` that holds the full license state. Encrypted? Sure. But with DES-CBC and a static key hardcoded in the binary: `ASCII("JuBsbsmP")`. That's not encryption, it's obfuscation theater.
 
 ```powershell
 $des = New-Object System.Security.Cryptography.DESCryptoServiceProvider
@@ -61,54 +72,58 @@ $dec = $des.CreateDecryptor()
 [Text.Encoding]::UTF8.GetString($dec.TransformFinalBlock($bytes, 0, $bytes.Length))
 ```
 
-Original: `trial`, `free`, `is_activated: 1`, `remained_seconds: 0`
+Decrypted content: `trial`, `free`, `is_activated: 1`, `remained_seconds: 0`
 
 ---
 
-## Phase 2: The Validation Flow
+## > Phase 2: Map the Validation Flow
 
 ```
-Init()
-+-- ParseAccountInfo()     <- Loads LOCAL file FIRST
-+-- RefreshPassportInfo()
-|   +-- LoginByAnonymity()   <- HTTP (fails -> CatchError)
-|   +-- GetVipInfoServer()   <- HTTP (fails -> CatchError)
-|       +-- 401/Unauthorized? -> ResetVipInfo()
-|       +-- Anything else?    -> Keep local data -> IsActive = true
-+-- InitCallBack()
+  Passport.Init()
+  |
+  +-- ParseAccountInfo()        Loads LOCAL file FIRST
+  |
+  +-- RefreshPassportInfo()
+  |   +-- LoginByAnonymity()    HTTP -> fails with CatchError
+  |   +-- GetVipInfoServer()    HTTP -> fails with CatchError
+  |       |
+  |       +-- 401/Unauthorized? -> ResetVipInfo() (kills local state)
+  |       +-- Anything else?    -> Keep local data -> IsActive = true
+  |
+  +-- InitCallBack()            Done.
 ```
 
-**The bug (Passport.cs:1019):**
+**The one-line bug (Passport.cs:1019):**
 
 ```csharp
 if (result.ErrorCode == ErrorCode.HttpUnauthorized || result.Status == 401) {
-    ResetVipInfo();  // Only this path destroys local state
+    ResetVipInfo();  // Only this branch destroys our forged state
 }
-// Everything else falls through to:
+// Everything else -> local data survives -> IsActive stays true
 IsActive = PassportInfo.license_info.is_activated == 1 && HasRemainDays();
 ```
 
-**HasRemainDays() (Passport.cs:1066):**
+**The second gift (Passport.cs:1066):**
 
 ```csharp
 if (info.is_lifetime) return true;  // No date check. Instant pass.
 ```
 
-The chain:
-1. Local file loads first -> we control initial state
-2. Block network -> server returns CatchError, not HttpUnauthorized -> no reset
-3. Set `is_lifetime: true` -> HasRemainDays() returns true instantly
+The exploit chain:
+1. Local file is parsed BEFORE server check -- we control the initial state
+2. Block network -- server returns CatchError, not HttpUnauthorized -- no reset
+3. Set `is_lifetime` -- HasRemainDays() returns true without checking the date
 4. IsActive = true. Done.
 
 ---
 
-## Phase 3: The Bypass
+## > Phase 3: Execute
 
 ### Block 34 domains
 
-Triple failover chain: `aoscdn.com -> wangxutech.com -> apsapp.cn`
+The HTTP client has a triple failover chain: `aoscdn.com -> wangxutech.com -> apsapp.cn`
 
-All to `127.0.0.1`. Connection refused. CatchError bubbles up. Reset never fires.
+Every single one goes to `127.0.0.1`. Connection refused. CatchError bubbles up. ResetVipInfo() is never reached.
 
 ### Forge the license
 
@@ -124,47 +139,50 @@ All to `127.0.0.1`. Connection refused. CatchError bubbles up. Reset never fires
 }
 ```
 
-DES encrypt. Write to passport.userinfo. Done.
+DES encrypt. Write to passport.userinfo. Launch the app.
+
+No watermark. Lifetime commercial. Done.
 
 ---
 
-## Downloads
+## > Downloads
 
-- **Original software**: [LightPDF Editor](https://www.lightpdf.com/free-pdf-editor.html)
-- **Cracked version**: [files/passport.userinfo](files/passport.userinfo) (forged license, place in `%APPDATA%\LightPDF\LightPDF Editor\`)
-- **Patcher**: [patcher.ps1](patcher.ps1) (run as admin, does everything automatically)
+| What | Link |
+|------|------|
+| Original software | [lightpdf.com/free-pdf-editor.html](https://www.lightpdf.com/free-pdf-editor.html) |
+| Patcher (run as admin) | [patcher.ps1](patcher.ps1) |
+| Restore script | [restore.ps1](restore.ps1) |
+| Cracked license file | [files/passport.userinfo](files/passport.userinfo) |
+| Original license file | [files/passport.userinfo.original](files/passport.userinfo.original) |
+| License generator | [scripts/generate_license.ps1](scripts/generate_license.ps1) |
 
-## Files
+---
 
-### Package contents
+## > Files
+
 ```
-+-- README.md
-+-- patcher.ps1               <- Run as Admin
-+-- restore.ps1               <- Undo everything
-+-- files/
-|   +-- passport.userinfo     <- Cracked license
-|   +-- passport.userinfo.original  <- Original trial license
-+-- scripts/
-    +-- generate_license.ps1
+  +-- README.md
+  +-- patcher.ps1               Run as Admin. Patches hosts + installs license.
+  +-- restore.ps1               Removes hosts entries + restores original.
+  +-- files/
+  |   +-- passport.userinfo         Forged lifetime commercial license
+  |   +-- passport.userinfo.original Original trial license (backup)
+  +-- scripts/
+      +-- generate_license.ps1  Generate your own forged license from JSON
 ```
 
-### [Download original license](files/passport.userinfo.original)
-### [Download cracked license](files/passport.userinfo)
-### [Download patcher](patcher.ps1)
-### [Download restore script](restore.ps1)
+---
+
+## > Key Takeaways
+
+  - **.NET licensing** -- decompilable by default. All your logic is readable.
+  - **Static DES key** -- the encryption is theater. One string in the binary.
+  - **Error handling is the exploit** -- CatchError vs HttpUnauthorized created a 1-line backdoor.
+  - **Domain failover chains** -- the app tries 3 domains per endpoint. Block all 34 or the check passes.
+  - **Lifetime bypasses date validation** -- HasRemainDays() short-circuits completely when is_lifetime is set.
 
 ---
 
-## Key Takeaways
-
-- .NET licensing = decompilable by default. All your license logic is readable.
-- Static DES key in the binary. The encryption is theater.
-- Error handling is the exploit. CatchError vs HttpUnauthorized is a 1-line bug.
-- Domain fallback chains must be fully blocked. Miss one and the server check succeeds.
-- Lifetime = no date validation. HasRemainDays() short-circuits completely.
-
----
-
-## Disclaimer
+## > Disclaimer
 
 Educational purposes only. Research conducted on software I own.

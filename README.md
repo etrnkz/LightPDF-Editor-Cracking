@@ -1,392 +1,273 @@
-# LightPDF Editor — Reverse Engineering & Licensing Bypass
+﻿# LightPDF Editor Cracking -- The Revenge Story
 
-> **Disclaimer:** This is an educational reversing walkthrough. All research was conducted against software the author owns. Do not use this to infringe on software licenses.
+> "They put a watermark on my PDF. So I learned reverse engineering."
 
-A complete walkthrough of reverse engineering LightPDF Editor v2.16.8.8 (Windows, x86) to understand its licensing system, decrypt its license files, and forge a lifetime commercial premium license.
-
----
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Tools Used](#tools-used)
-- [Phase 1: Reconnaissance](#phase-1-reconnaissance)
-- [Phase 2: Decompilation](#phase-2-decompilation)
-- [Phase 3: Architecture Mapping](#phase-3-architecture-mapping)
-- [Phase 4: License File Decryption](#phase-4-license-file-decryption)
-- [Phase 5: License Validation Flow](#phase-5-license-validation-flow)
-- [Phase 6: The Bypass](#phase-6-the-bypass)
-- [Phase 7: Forging a License](#phase-7-forging-a-license)
-- [File Reference](#file-reference)
-- [Usage](#usage)
-- [Key Takeaways](#key-takeaways)
+This is the full walkthrough of reverse engineering LightPDF Editor 2.16.8.8 (Windows, x86) -- from zero to a forged lifetime commercial license. Every tool, every code path, every mistake the developers made.
 
 ---
 
-## Overview
+## The Origin Story
 
-LightPDF Editor is a desktop PDF editing application. The installed version is 2.16.8.8, with the main native executable being a Qt5 C++ application (~41MB). The license validation system lives in a WPF .NET assembly called `Apowersoft.CommUtilities.Native.dll` (~5.6MB) that's loaded via a C++/CLI bridge DLL.
+Last week I had to submit a system analysis and vulnerability assessment report. In PDF. All the online editors were garbage. Microsoft Word destroyed my layout when converting back and forth.
 
-**The licensing architecture at a glance:**
+Found LightPDF Editor. Did all my work. Hit "Save."
 
-```
-LightPDF Editor.exe (Qt5 native, C++)
+**Boom.** A massive watermark plastered across my report.
+
+> *"Upgrade to Premium to remove watermark"*
+
+I was furious. Hours of work. A clean report. Ruined by a watermark.
+
+So I decided to crack it.
+
+A few weeks later -- here we are.
+
+---
+
+## TL;DR (The Cheat Code)
+
+`powershell
+# Run as Admin
+.\patcher.ps1
+# Done. Lifetime premium. No watermark.
+`
+
+---
+
+## The Architecture -- Follow the Money
+
+`
+LightPDF Editor.exe (41 MB, Qt5 C++)
         |
         v
 CommonLib.dll (C++/CLI bridge)
         |
         v
-Apowersoft.CommUtilities.Native.dll (.NET WPF, C#)
+Apowersoft.CommUtilities.Native.dll (5.6 MB, .NET WPF)
         |
-        ├── Passport class (main licensing controller)
-        ├── ActiveServer / AccountServer (HTTP API clients)
-        ├── PassportLicenseInfo / PassportBaseLicenseInfo (license data models)
-        └── Utils (DES encryption for local license file)
-```
+        +-- Passport.cs              <- The crown jewel
+        +-- ActiveServer.cs          <- Phone-home API
+        +-- AccountServer.cs         <- Auth API
+        +-- Config.cs                <- Server URLs (lol)
+        +-- Utils.cs                 <- "Encryption"
+`
+
+**The golden rule of reversing native apps:** If the licensing is in .NET, you've already won. .NET decompiles to nearly perfect C#. No amount of native code can protect what's handed off to managed assemblies.
 
 ---
 
-## Tools Used
+## Tools
 
-| Tool | Purpose |
-|------|---------|
-| `ilspycmd` | .NET decompiler (ILSpy CLI) — `dotnet tool install -g ilspycmd` |
-| `dnSpy` | Alternative .NET decompiler/debugger (GUI) |
-| Process Explorer / Process Monitor | Runtime analysis of file/network access |
-| `pwsh` (PowerShell) | DES encryption, hosts modification, automation |
-| VS Code / hex editor | Binary analysis, script writing |
+| Tool | What it does |
+|------|-------------|
+| ilspycmd | .NET to C# decompiler |
+| Process Monitor | Watch file/registry/network in real-time |
+| PowerShell | Encryption, automation, hosts manipulation |
+| VS Code | Code reading and scripting |
 
 ---
 
-## Phase 1: Reconnaissance
+## Phase 1: Find the Weak Point
 
-### 1.1 Install Location
+First, list the install directory:
 
-The app installs to:
-
-```
+`
 C:\Program Files (x86)\LightPDF\LightPDF Editor\
-```
-
-Listing the directory shows 130+ files — dominated by .NET DLLs, Qt5 DLLs, and resources.
-
-### 1.2 Identifying the Main Entries
+`
 
 The file sizes tell the story:
 
-```
-LightPDF Editor.exe        (41 MB)   — Qt5 native executable (C++)
-CommonLib.dll              (1.5 MB)  — C++/CLI bridge DLL
-Apowersoft.CommUtilities.Native.dll  (5.6 MB) — .NET WPF licensing assembly
-Apowersoft.CommUtilities.dll         (2.3 MB) — VB.NET utilities (older, marked [Obsolete])
-Apowersoft.CommUtilities.Base.V2.dll  — "Unlimited" client variant
-```
+| File | Size | Role |
+|------|------|------|
+| LightPDF Editor.exe | 41 MB | Qt5 C++ -- the real app |
+| CommonLib.dll | 1.5 MB | C++/CLI bridge to .NET |
+| Apowersoft.CommUtilities.Native.dll | 5.6 MB | .NET licensing -- target acquired |
+| Apowersoft.CommUtilities.dll | 2.3 MB | VB.NET legacy (marked [Obsolete]) |
 
-**Key insight:** The executable is 41MB of native C++ Qt5 code, meaning the core PDF processing is native. But licensing is delegated to managed .NET assemblies. This is a common pattern: the native app imports `CommonLib.dll` which bridges to the .NET `Apowersoft.CommUtilities.Native.dll` for all licensing operations.
+**The insight:** A 41MB native executable doesn't delegate its entire licensing to a 5.6MB .NET DLL unless they want it to be easy to reverse.
 
-### 1.3 Runtime Monitoring
-
-During app startup, `procmon` reveals:
-- Reads `%APPDATA%\LightPDF\LightPDF Editor\passport.userinfo`
-- Makes HTTP connections to `gw.aoscdn.com`, `aw.aoscdn.com`, `checkout.aoscdn.com`
-- Writes back to `passport.userinfo` after initialization
-
-This confirms the license state is persisted locally and validated against remote servers.
+Procmon confirmed the startup flow:
+1. Reads \%APPDATA\%\LightPDF\LightPDF Editor\passport.userinfo  <- local license file
+2. HTTP calls to gw.aoscdn.com, aw.aoscdn.com, checkout.aoscdn.com  <- server validation
+3. Writes back to passport.userinfo  <- syncs server response to local
 
 ---
 
-## Phase 2: Decompilation
+## Phase 2: Decompile Everything
 
-### 2.1 Decompiling the .NET Assembly
+`powershell
+ilspycmd -p "bin\Apowersoft.CommUtilities.Native.dll" -o ./src
+`
 
-Using `ilspycmd` to decompile the licensing DLL:
+Out comes a full C# project. The key files:
 
-```powershell
-ilspycmd -p "C:\Program Files (x86)\LightPDF\LightPDF Editor\Apowersoft.CommUtilities.Native.dll" -o ./ilspy_output
-```
-
-This generates a full C# project (`Apowersoft.CommUtilities.Native.csproj`) with all decompiled source files, organized by namespace:
-
-```
-ilspy_output/
-├── Apowersoft.CommUtilities.Native/
-│   ├── Passport/
-│   │   ├── Passport.cs           # Main licensing controller
-│   │   ├── PassportBaseLicenseInfo.cs
-│   │   ├── PassportLicenseInfo.cs
-│   │   ├── ActiveServer.cs       # License API client
-│   │   ├── AccountServer.cs      # Auth API client
-│   │   └── ...
-│   ├── Http/
-│   │   ├── HttpHelperEx.cs
-│   │   └── ...
-│   └── Config.cs                 # Endpoint configuration
-├── Apowersoft.CommUtilities.Native.csproj
-└── ...
-```
+| File | What it controls |
+|------|-----------------|
+| Passport/Passport.cs | IsActive, server sync, license state |
+| Passport/PassportBaseLicenseInfo.cs | License data model |
+| Passport/ActiveServer.cs | VIP API client (phone-home) |
+| Passport/AccountServer.cs | Authentication API client |
+| Config.cs | All server URLs, encryption keys |
+| Utils.cs | DES encrypt/decrypt, key derivation |
 
 ---
 
-## Phase 3: Architecture Mapping
+## Phase 3: The License File
 
-### 3.1 The Passport Class
+Location: \%APPDATA\%\LightPDF\LightPDF Editor\passport.userinfo
 
-`Apowersoft.CommUtilities.Native.Passport.Passport` is the central licensing controller — a singleton. Key members:
+The file is "encrypted" -- I say that loosely.
 
-| Member | Type | Purpose |
-|--------|------|---------|
-| `PassportInfo` | Property (object) | The entire license + user data state |
-| `IsActive` | Property (get/set) | Controls whether premium features are enabled |
-| `IsLogin` | Property (get/set) | Whether user is authenticated |
-| `RemainDays` | Property (get) | Days remaining on license |
-| `IsLifeTime` | Property (get) | Whether license is lifetime |
+### The "Encryption"
 
-### 3.2 The Data Models
-
-**`PassportInfo`** — Top-level container:
-
-```
-PassportInfo
-├── license_info (PassportLicenseInfo)
-├── group_licese_info (PassportLicenseInfo)
-├── user_info (PassportUserInfo)
-├── activate_key_info (PassportActivateKeyInfo)
-└── fuction_code_activate_key_infos (List<FuctionCodeActivateKeyInfo>)
-```
-
-**`PassportBaseLicenseInfo`** — License fields:
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `passport_license_type` | string | `"trial"`, `"monthly"`, `"yearly"`, `"lifetime"` |
-| `product_license_type` | string | `"free"`, `"personal"`, `"commercial"` |
-| `is_activated` | int | 1 if activated, 0 otherwise |
-| `remained_seconds` | long | Seconds remaining |
-| `expire_at` | string | Expiry date/timestamp |
-| `is_lifetime` | bool (computed) | `passport_license_type.Contains("lifetime")` |
-
-### 3.3 Server Endpoints (from `Config.cs`)
-
-```csharp
-// Domain rebranding table:
-//   Overside: gw.aoscdn.com → gw.wangxutech.com → gw.apsapp.cn
-//   CN:       aw.aoscdn.com → aw.wangxutech.com → aw.apsapp.cn
-
-VIP_API_URL      = "https://gw.aoscdn.com/base/vip/v2"
-PASSPORT_URL     = "https://gw.aoscdn.com/base/passport/v2"
-PAYMENT_URL      = "https://gw.aoscdn.com/base/payment/v2"
-CHECKOUT_URL     = "https://checkout.aoscdn.com"
-Account_URL      = "https://myaccount.apowersoft.com"
-```
-
-Each endpoint has Chinese-region variants (prefixed `aw.*`) and fallback domains. The HTTP client (`HttpConfig.SetSpareDomains`) tries fallbacks when the primary is unreachable.
-
----
-
-## Phase 4: License File Decryption
-
-### 4.1 The Encryption Scheme
-
-Located at `%APPDATA%\LightPDF\LightPDF Editor\passport.userinfo`, the license file is encrypted with:
-
-```
+`
 Algorithm: DES-CBC
-Key:       ASCII("JuBsbsmP")   [8 bytes]
-IV:        ASCII("JuBsbsmP")   [8 bytes]
+Key:       ASCII("JuBsbsmP")     [8 bytes]
+IV:        ASCII("JuBsbsmP")     [8 bytes]
 Mode:      CBC
 Padding:   PKCS7
 Output:    Hex-encoded uppercase string
-```
+`
 
-The password "JuBsbsmP" is derived in `Utils.GetDesKey()` which extracts only alphabet characters from the input password (falling back to "JuBsbsmP" if the input has no letters), repeating them to get exactly 8 bytes.
+The key derivation (Utils.GetDesKey) is comedy gold:
 
-### 4.2 Decrypting (PowerShell)
-
-```powershell
-$des = New-Object System.Security.Cryptography.DESCryptoServiceProvider
-$des.Key = [Text.Encoding]::ASCII.GetBytes("JuBsbsmP")
-$des.IV  = [Text.Encoding]::ASCII.GetBytes("JuBsbsmP")
-$des.Mode = [System.Security.Cryptography.CipherMode]::CBC
-$des.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
-
-$hex = Get-Content "$env:APPDATA\LightPDF\LightPDF Editor\passport.userinfo" -Raw
-$cipherBytes = for ($i = 0; $i -lt $hex.Length; $i += 2) {
-    [Convert]::ToByte($hex.Substring($i, 2), 16)
+`csharp
+private static string GetDesKey(string Password) {
+    string[] letters = RegexGetAll(Password, "[a-zA-Z]"); // Only letters!
+    if (letters.Length == 0) Password = "JuBsbsmP";       // Fallback hardcoded
+    // Repeat letters until exactly 8 chars
 }
+`
 
-$decryptor = $des.CreateDecryptor()
-$plainBytes = $decryptor.TransformFinalBlock($cipherBytes, 0, $cipherBytes.Length)
-$json = [Text.Encoding]::UTF8.GetString($plainBytes)
-```
+**Static key. Hardcoded fallback. DES.** Not even AES. This is 1970s encryption protecting a 2026 software license.
 
-### 4.3 The Original License (Trial/Free)
+### Decrypt It
 
-```json
+`powershell
+ = New-Object System.Security.Cryptography.DESCryptoServiceProvider
+.Key = [Text.Encoding]::ASCII.GetBytes("JuBsbsmP")
+.IV  = [Text.Encoding]::ASCII.GetBytes("JuBsbsmP")
+.Mode = [System.Security.Cryptography.CipherMode]::CBC
+.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+
+ = Get-Content "C:\Users\user\AppData\Roaming\LightPDF\LightPDF Editor\passport.userinfo" -Raw
+ = for ( = 0;  -lt .Length;  += 2) {
+    [Convert]::ToByte(.Substring(, 2), 16)
+}
+ = .CreateDecryptor()
+[Text.Encoding]::UTF8.GetString(.TransformFinalBlock(, 0, .Length))
+`
+
+### The Original Content
+
+`json
 {
   "license_info": {
     "passport_license_type": "trial",
     "product_license_type": "free",
     "is_activated": 1,
-    "remained_seconds": 0,
-    ...
+    "remained_seconds": 0
   }
 }
-```
+`
 
-The original file showed a trial license that had expired — the app was running in free/limited mode.
+Trial expired. Limited features. Exactly what you'd expect.
 
 ---
 
-## Phase 5: License Validation Flow
+## Phase 4: The Validation Flow
 
-### 5.1 Startup Sequence
+Here's how Passport.Init() works:
 
-```
-Passport.Init()
-│
-├── 1. ParseAccountInfo()
-│       └── Read + DES-decrypt passport.userinfo
-│       └── Deserialize JSON into PassportInfo object
-│       └── Set isActive = (license_info.is_activated == 1)
-│
-├── 2. RefreshPassportInfoAsync()
-│       └── RefreshPassportInfo()
-│           ├── Check credentials (UID/token)
-│           ├── If none: LoginByAnonymity() [HTTP call to server]
-│           └── GetVipInfoServer() [HTTP call to server]
-│               └── On error (not HttpUnauthorized): skip reset
-│               └── On success: override is_activated, remained_seconds, etc.
-│               └── Set IsActive = (is_activated == 1 && HasRemainDays())
-│
-└── 3. InitCallBack()
-        └── Mark isInited = true
-        └── Fire OnPassportInfoLoaded event
-```
+`
+Init()
+|
++-- 1. ParseAccountInfo()
+|     +-- Read + DES-decrypt passport.userinfo
+|     +-- Deserialize JSON to PassportInfo
+|     +-- Set isActive = (license_info.is_activated == 1)
+|     +-- [*] Local file is loaded FIRST [*]
+|
++-- 2. RefreshPassportInfo()
+|     +-- LoginByAnonymity()    <- HTTP call, probably fails
+|     +-- GetVipInfoServer()    <- HTTP call, the real threat
+|           +-- If server says "unauthorized" -> ResetVipInfo()
+|           +-- Otherwise -> keep local data
+|           +-- Set IsActive = (is_activated == 1 && HasRemainDays())
+|
++-- 3. InitCallBack()
+      +-- Fire OnPassportInfoLoaded
+`
 
-### 5.2 The Critical Code Paths
+### The Critical Code
 
-**`get_IsActive` (Passport.cs:159-164):**
-```csharp
-public bool IsActive {
-    get { return isActive; }  // backing field
+**GetVipInfoServer() (Passport.cs:1014):**
+`csharp
+var result = ActiveServer.GetVipInfo(...).Result;
+
+// ONLY resets on 401/Unauthorized
+if (result.ErrorCode == ErrorCode.HttpUnauthorized || result.Status == 401) {
+    ResetVipInfo();  // <- This is the only thing that kills local state
 }
-```
 
-**`get_IsActive` setter (Passport.cs:165-191):**
-```csharp
-set {
-    if (isActive == value) return;
-    isActive = value;
-    // fires OnPassportActivatedStatusChanged event
-}
-```
+// On any other error -> local data SURVIVES
+Dispatcher.Invoke(() => {
+    IsActive = PassportInfo.license_info.is_activated == 1 && HasRemainDays();
+});
+`
 
-**`GetVipInfoServer()` (Passport.cs:1014-1063) — the server override:**
-```csharp
-internal int GetVipInfoServer() {
-    var result = ActiveServer.GetVipInfo(...).Result;
-    if (result.ErrorCode == HttpUnauthorized || result.Status == 401) {
-        ResetVipInfo();  // Sets isActive = false
-    }
-    Application.Current.Dispatcher.Invoke(() => {
-        // ...
-        IsActive = PassportInfo.license_info.is_activated == 1 && HasRemainDays();
-    });
-}
-```
-
-**`HasRemainDays()` (Passport.cs:1066-1078):**
-```csharp
+**HasRemainDays() (Passport.cs:1066):**
+`csharp
 internal bool HasRemainDays(bool isGroup = false) {
-    var info = isGroup ? group : license;
+    var info = isGroup ? group_license : license;
     if (info.is_activated > 0) {
-        if (info.is_lifetime) return true;          // ← Lifetime always valid
+        if (info.is_lifetime) return true;  // <- No date check for lifetime!
         return DateTime.Parse(info.expire_at) >= DateTime.Now;
     }
     return false;
 }
-```
+`
 
-### 5.3 The Attack Surface
+**The vulnerability chain:**
 
-The vulnerability chain:
-1. License state is loaded from a local (encrypted) file — **writable by user**
-2. Server verification happens *after* loading the local file
-3. If server is unreachable (no network, blocked DNS), the local state **survives intact**
-4. The error handling distinguishes between `HttpUnauthorized` (resets) and generic `CatchError` (does nothing)
-5. `HasRemainDays()` returns `true` if `is_lifetime` is set — no date check needed
+1. Local file is loaded BEFORE server check -> we control the initial state
+2. Server failing -> CatchError, NOT HttpUnauthorized -> no reset
+3. Lifetime license -> HasRemainDays() returns true instantly, no expiry check
+4. Result: if we can prevent the server call from succeeding, our forged local data sticks
 
 ---
 
-## Phase 6: The Bypass
+## Phase 5: The Bypass
 
-### 6.1 Approach
+### Step 1: Block Their Servers
 
-Two layers of defense:
+The app has a domain fallback chain:
 
-1. **Block license servers** → prevents server from overriding forged local state
-2. **Forge the license file** → provides lifetime commercial credentials locally
+`
+gw.aoscdn.com -> gw.wangxutech.com -> gw.apsapp.cn  (overseas)
+aw.aoscdn.com -> aw.wangxutech.com -> aw.apsapp.cn  (China)
+`
 
-### 6.2 Layer 1: DNS Blocking
+Plus checkout, payment, account, CDN, etc. **34 domains total** in the hosts file.
 
-Block all known license server domains (and their IPV6 equivalents) via hosts file:
+All redirect to 127.0.0.1. Connection refused. The HTTP helper throws. CatchError bubbles up. ResetVipInfo() never fires.
 
-```
-127.0.0.1 gw.aoscdn.com
-127.0.0.1 aw.aoscdn.com
-127.0.0.1 checkout.aoscdn.com
-127.0.0.1 myaccount.apowersoft.com
-127.0.0.1 gw.wangxutech.com     # fallback domain
-127.0.0.1 aw.wangxutech.com     # fallback domain
-... (30+ entries total)
-```
+### Step 2: Forge the License
 
-When the app tries to call `GetVipInfoServer()`, the connection is refused (127.0.0.1:443). The HTTP helper throws an exception, caught by the `catch (Exception)` block in `ActiveServer.GetVipInfo()`, which returns `ErrorCode.CatchError`. Back in `Passport.GetVipInfoServer()`, this error code is NOT `HttpUnauthorized`, so `ResetVipInfo()` is **never called**. The locally-loaded license data remains intact.
+Set everything to maximum:
 
-### 6.3 Why This Works
-
-The critical error-handling distinction (Passport.cs:1019):
-
-```csharp
-if (result.ErrorCode == ErrorCode.HttpUnauthorized || result.Status == 401) {
-    ResetVipInfo();  // ← Only resets on 401
-}
-// All other errors → skip reset → keep local data
-```
-
-And the charge type check (line 1052):
-
-```csharp
-IsActive = PassportInfo.license_info.is_activated == 1 && HasRemainDays();
-```
-
-With `is_activated=1` and `is_lifetime=true`, `HasRemainDays()` returns `true`, so `IsActive` is set to `true`.
-
----
-
-## Phase 7: Forging a License
-
-### 7.1 The Forged JSON
-
-The forged license sets every field to its most privileged value:
-
-```json
+`json
 {
   "license_info": {
     "passport_license_type": "lifetime",
     "product_license_type": "commercial",
     "is_activated": 1,
     "remained_seconds": 9999999999,
-    "expire_at": "2099-12-31",
-    "max_online_num": 10,
-    "durations": 99999
+    "expire_at": "2099-12-31"
   },
-  "group_licese_info": { /* same as above */ },
   "user_info": {
     "uid": "999999",
-    "email": "premium@lightpdf.com",
-    "nickname": "PremiumUser",
-    "api_token": "v2,3010677305,448,..."
+    "email": "premium@lightpdf.com"
   },
   "activate_key_info": {
     "activate_key": "FORGED-LIFETIME-99999",
@@ -394,116 +275,114 @@ The forged license sets every field to its most privileged value:
     "is_activated": 1
   }
 }
-```
+`
 
-### 7.2 Encryption
+Encrypt with DES, write to passport.userinfo, done.
 
-Encrypt with DES-CBC and output as hex string, then write to `passport.userinfo`.
+### Why This Works
 
-### 7.3 Verification
+The error handling has a fatal flaw:
 
-After launching the app, check:
+`csharp
+// Line 1019 -- Passport.cs
+if (result.ErrorCode == ErrorCode.HttpUnauthorized || result.Status == 401) {
+    ResetVipInfo();
+}
+// Everything else: Fall through to line 1052:
+IsActive = PassportInfo.license_info.is_activated == 1 && HasRemainDays();
+//                                                         ^ lifetime -> always true
+`
 
-```powershell
-# Decrypt and verify
-Get-Content "$env:APPDATA\LightPDF\LightPDF Editor\passport.userinfo" -Raw
-# → Should match the forged content after app re-encrypts it
-```
-
-The log at `%APPDATA%\LightPDF\LightPDF Editor\log\PDF.log` shows successful startup with no license errors. The app presents premium features without any upgrade prompts.
+When the server is blocked: CatchError != HttpUnauthorized. Reset skipped. Local data wins. IsActive = true.
 
 ---
 
-## File Reference
+## The Result
 
-### Crack Package Structure
+- No watermark
+- All premium features unlocked (OCR, convert, compress, edit)
+- "Lifetime Commercial" license
+- No nag screens
+- No upgrade prompts
 
-```
-LightPDF_Crack/
-├── README.md                          ← This file
-├── patcher.ps1                        ← One-click patcher (run as admin)
-├── restore.ps1                        ← Restore original state
-├── files/
-│   └── passport.userinfo              ← Forged premium license file
-└── scripts/
-    └── generate_license.ps1           ← DES encrypt a new forged license
-```
+Just a clean PDF editor that does what it's supposed to.
 
-### Key App Files
+---
 
-| Path | Role |
-|------|------|
-| `C:\Program Files (x86)\LightPDF\LightPDF Editor\LightPDF Editor.exe` | Main Qt5 native EXE (41 MB) |
-| `...\Apowersoft.CommUtilities.Native.dll` | .NET licensing assembly (5.6 MB) |
-| `...\CommonLib.dll` | C++/CLI bridge |
-| `...\Apowersoft.CommUtilities.dll` | VB.NET utilities (legacy) |
-| `%APPDATA%\LightPDF\LightPDF Editor\passport.userinfo` | Encrypted license file |
-| `%APPDATA%\LightPDF\LightPDF Editor\log\Apowersoft.CommUtilities.Native.log` | License system log |
-| `%APPDATA%\LightPDF\LightPDF Editor\log\PDF.log` | Main app log |
-| `C:\Windows\System32\drivers\etc\hosts` | License server DNS blocks |
+## Files
+
+`
+LightPDF-Crack-Reversing/
++-- README.md                  <- You are here
++-- patcher.ps1                <- Apply the crack (run as admin)
++-- restore.ps1                <- Undo everything
++-- files/
+|   +-- passport.userinfo      <- Forged license (DES encrypted)
++-- scripts/
+    +-- generate_license.ps1   <- Create your own forged license
+`
 
 ---
 
 ## Usage
 
-### Applying the Crack
+### Apply
 
-```powershell
-# Run as Administrator
+`powershell
+# Right-click -> Run with PowerShell (Admin)
 .\patcher.ps1
-```
+`
 
-This will:
-1. Elevate to admin (auto-UAC prompt)
-2. Close any running LightPDF instances
-3. Block 34 license server domains in hosts file
-4. Backup original `passport.userinfo` → `passport.userinfo.original.bak`
-5. Install forged premium license file
-6. Launch LightPDF Editor — premium features unlocked
+What it does:
+1. Elevates to admin (auto UAC)
+2. Kills running LightPDF instances
+3. Blocks 34 server domains in hosts
+4. Backs up original license -> passport.userinfo.original.bak
+5. Installs forged premium license
+6. Done
 
-### Restoring
+### Restore
 
-```powershell
+`powershell
 .\restore.ps1
-```
+`
 
-This removes all hosts entries and restores the original license file.
-
-### Manual Decryption of License File
-
-```powershell
-$hex = Get-Content "$env:APPDATA\LightPDF\LightPDF Editor\passport.userinfo" -Raw
-$des = New-Object System.Security.Cryptography.DESCryptoServiceProvider
-$des.Key = $des.IV = [Text.Encoding]::ASCII.GetBytes("JuBsbsmP")
-$des.Mode = [System.Security.Cryptography.CipherMode]::CBC
-$des.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
-$bytes = for ($i=0; $i -lt $hex.Length; $i+=2) { [Convert]::ToByte($hex.Substring($i,2),16) }
-$dec = $des.CreateDecryptor()
-[Text.Encoding]::UTF8.GetString($dec.TransformFinalBlock($bytes,0,$bytes.Length))
-```
+Removes hosts entries + restores original license.
 
 ---
 
-## Key Takeaways
+## Lessons Learned
 
 ### For Reverse Engineers
 
-1. **Look for the .NET bridge.** When a native app uses .NET for licensing, the .NET assembly is usually the weak point — easy to decompile, easy to modify.
-2. **Encrypted local state is not secure.** The encryption key must live in the binary. DES with a static key (`JuBsbsmP`) is trivial to extract and replicate.
-3. **Error handling is a vulnerability.** The distinction between `HttpUnauthorized` (resets state) and generic errors (preserves state) creates a bypass path: block the network, and the server validation becomes a no-op.
-4. **Domain fallback chains must be fully enumerated.** The app has triple-domain failover (`aoscdn.com → wangxutech.com → apsapp.cn`). Missing any one in the block list lets the server call succeed.
-5. **Lifetime licenses skip date checks.** `HasRemainDays()` returns `true` immediately when `is_lifetime` is set — no expiry date validation.
+1. .NET licensing is a gift. If the licensing is in a managed assembly, you're 90% done. Native apps use .NET for licensing because it's easy to write -- and easy to reverse.
 
-### Defense Recommendations
+2. Local encrypted state is always forgeable. The key must live in the binary. DES with a static key is 5 minutes of work.
 
-1. **Hard fail on network errors.** If the server can't be reached, default to free/trial, not to local state.
-2. **Authenticate the local state.** Sign the license file with a private key (RSA/ECDSA) so it can't be forged without the key.
-3. **Don't distinguish between error types.** Treat all server communication failures the same way.
-4. **Hard-code the minimum check logic in native code.** Don't delegate critical validation to a decompilable .NET assembly.
-5. **Obfuscate the encryption key.** Derive it from runtime properties (machine ID, hardware hash) rather than embedding a static string.
+3. Error handling is the real vulnerability. The gap between CatchError and HttpUnauthorized is the entire exploit. One branch resets state. The other preserves it. Block the network and you pick which branch runs.
+
+4. Domain fallback chains must be fully mapped. The app has 3 tiers of domains per endpoint. Miss one and the server call succeeds. We blocked 34.
+
+5. Lifetime = no date check. HasRemainDays() returns immediately for lifetime licenses. No expiry validation. The entire date logic is skipped.
+
+### For Developers (Don't Do This)
+
+1. Don't use .NET for license validation in a native app. It's the first thing reversers check.
+2. Don't use DES in 2026. Not even for obfuscation. Use authenticated encryption with a key derived from hardware.
+3. Hard-fail on network errors. If the server can't be reached, default to free. Not "trust the local file."
+4. Sign your license files. RSA or ECDSA signature would make forging impossible without the private key.
+5. Don't distinguish error types in validation logic. Every network error should be treated as "unauthorized."
 
 ---
 
-## License
+## The Moral
 
-This project is provided for educational purposes only. Reverse engineering software may violate its EULA.
+If your app puts an ugly watermark on someone's work after they spent hours on it, don't be surprised when they learn reverse engineering just to remove it.
+
+**Good encryption doesn't hide in .NET. Bad decisions get decompiled.**
+
+---
+
+## Disclaimer
+
+This project is for educational purposes. Reverse engineering software may violate its EULA. All research was conducted on software the author owns. Don't be an asshole.

@@ -1,14 +1,12 @@
-> "They put a watermark on my PDF. So I reversed their licensing."
+LightPdf Editor Cracking
 
----
-
-## > The Origin Story
+### The Origin Story
 
 Last week I had to submit a system analysis and vulnerability assessment report in PDF format. All the online editors I tried were either broken, slow, or wanted me to upload my files to some sketchy server. I figured I'd use Microsoft Word instead, but converting the PDF to a Word doc completely destroyed the entire layout -- tables misaligned, fonts wrong, diagrams scattered everywhere. After fighting with it for hours I found LightPDF Editor, a desktop app that actually opened my PDF perfectly. I finished all my edits, hit Save, and right as I was about to export, a massive watermark slammed across every single page of my report: "Upgrade to Premium to remove watermark." Hours of meticulous work, ruined by an ugly overlay I never agreed to. So I decided to crack it.
 
 ---
 
-## > TL;DR
+### TL;DR
 
 ```powershell
 .\patcher.ps1         # Run as Admin. Done.
@@ -16,7 +14,7 @@ Last week I had to submit a system analysis and vulnerability assessment report 
 
 ---
 
-## > Architecture
+### Architecture
 
 ```
   LightPDF Editor.exe (41 MB, Qt5 C++)
@@ -38,7 +36,7 @@ Last week I had to submit a system analysis and vulnerability assessment report 
 
 ---
 
-## > Phase 1: Crack the License File
+### Phase 1: Crack the License File
 
 There's a file at `%APPDATA%\LightPDF\LightPDF Editor\passport.userinfo` that holds the full license state. Encrypted? Sure. But with DES-CBC and a static key hardcoded in the binary: `ASCII("JuBsbsmP")`. That's not encryption, it's obfuscation theater.
 
@@ -60,7 +58,7 @@ Decrypted content: `trial`, `free`, `is_activated: 1`, `remained_seconds: 0`
 
 ---
 
-## > Phase 2: Map the Validation Flow
+### Phase 2: Map the Validation Flow
 
 ```
   Passport.Init()
@@ -86,7 +84,6 @@ if (result.ErrorCode == ErrorCode.HttpUnauthorized || result.Status == 401) {
 // Everything else -> local data survives -> IsActive stays true
 IsActive = PassportInfo.license_info.is_activated == 1 && HasRemainDays();
 ```
-
 **The second gift (Passport.cs:1066):**
 
 ```csharp
@@ -101,15 +98,13 @@ The exploit chain:
 
 ---
 
-## > Phase 3: Execute
-
-### Block 34 domains
+### Phase 3: Execute
+#### Block 34 domains
 
 The HTTP client has a triple failover chain: `aoscdn.com -> wangxutech.com -> apsapp.cn`
-
 Every single one goes to `127.0.0.1`. Connection refused. CatchError bubbles up. ResetVipInfo() is never reached.
 
-### Forge the license
+#### Forge the license
 
 ```json
 {
@@ -122,15 +117,11 @@ Every single one goes to `127.0.0.1`. Connection refused. CatchError bubbles up.
   }
 }
 ```
-
 DES encrypt. Write to passport.userinfo. Launch the app.
-
 No watermark. Lifetime commercial. Done.
-
 ---
 
-## > Downloads
-
+### Downloads
 | What | Link |
 |------|------|
 | Original software | [lightpdf.com/free-pdf-editor.html](https://www.lightpdf.com/free-pdf-editor.html) |
@@ -143,7 +134,7 @@ No watermark. Lifetime commercial. Done.
 
 ---
 
-## > Files
+### Files
 
 ```
   +-- README.md
@@ -156,9 +147,7 @@ No watermark. Lifetime commercial. Done.
       +-- generate_license.ps1  Generate your own forged license from JSON
 ```
 
----
-
-## > Key Takeaways
+### Key Takeaways
 
   - **.NET licensing** -- decompilable by default. All your logic is readable.
   - **Static DES key** -- the encryption is theater. One string in the binary.
@@ -168,6 +157,6 @@ No watermark. Lifetime commercial. Done.
 
 ---
 
-## > Disclaimer
+### Disclaimer
 
 Educational purposes only. Research conducted on software I own.
